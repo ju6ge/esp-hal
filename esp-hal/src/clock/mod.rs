@@ -70,6 +70,33 @@ use crate::{
 #[cfg_attr(esp32s3, path = "clocks_ll/esp32s3.rs")]
 pub(crate) mod clocks_ll;
 
+#[derive(Debug)]
+enum ClockErrors {
+    UnknownClockSource(u8),
+}
+
+#[cfg(esp32c3)]
+enum CpuClockSource {
+    PllClk,
+    RcFastClk,
+    XtalClk,
+}
+
+#[cfg(esp32c3)]
+impl TryFrom<u8> for CpuClockSource {
+    type Error = ClockErrors;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::XtalClk),
+            1 => Ok(Self::PllClk),
+            2 => Ok(Self::RcFastClk),
+            _ => Err(ClockErrors::UnknownClockSource(value)),
+        }
+    }
+}
+
+
 pub trait Clock {
     fn frequency(&self) -> HertzU32;
 
@@ -247,6 +274,17 @@ pub struct Clocks<'d> {
     // TODO chip specific additional ones as needed
 }
 
+use core::fmt::Debug;
+impl<'d> Debug for Clocks<'d> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Clocks")
+            .field("cpu_clock", &self.cpu_clock)
+            .field("apb_clock", &self.apb_clock)
+            .field("xtal_clock", &self.xtal_clock)
+            .finish()
+    }
+}
+
 #[doc(hidden)]
 impl<'d> Clocks<'d> {
     /// This should not be used in user code.
@@ -274,6 +312,64 @@ impl<'d> Clocks<'d> {
             pll_48m_clock: raw_clocks.pll_48m_clock,
             #[cfg(esp32h2)]
             pll_96m_clock: raw_clocks.pll_96m_clock,
+        }
+    }
+
+    /// This function is to be used with caution!
+    /// It is here to provide compatibility of esp-hal with esp-idf-hal.
+    /// It reconstructs the currently used clock configuration
+    /// without changing it. This enables usage of esp-hal together with
+    /// esp-idf-hal.
+    #[cfg(esp32c3)]
+    pub unsafe fn take() -> Clocks<'d> {
+        use core::ops::Div;
+
+        use crate::system::SystemExt;
+
+        let xtal_freq = XtalClock::RtcXtalFreq40M;
+        let system = crate::peripherals::SYSTEM::steal();
+        let cpu_src: CpuClockSource = system
+            .sysclk_conf()
+            .read()
+            .soc_clk_sel()
+            .bits()
+            .try_into()
+            .unwrap();
+        let cpu_period_sel = system.cpu_per_conf().read().cpuperiod_sel().bits();
+        let pre_div_cnt: u32 = system.sysclk_conf().read().pre_div_cnt().bits() as u32;
+
+        let cpu_freq = match &cpu_src {
+            CpuClockSource::XtalClk => { xtal_freq.frequency().div( pre_div_cnt + 1 ) },
+            CpuClockSource::RcFastClk => { HertzU32::kHz(17500).div( pre_div_cnt + 1 ) },
+            CpuClockSource::PllClk => {
+                match cpu_period_sel {
+                    0 => CpuClock::Clock80MHz.frequency(),
+                    1 => CpuClock::Clock160MHz.frequency(),
+                    _ => panic!("Cpu Clock configuration invalid 'cpu_period_sel'={cpu_period_sel} is not a known state")
+                }
+            }
+        };
+
+        Self {
+            _private: system.split().clock_control.into_ref(),
+            cpu_clock: cpu_freq,
+            apb_clock: match cpu_src {
+                CpuClockSource::PllClk => HertzU32::MHz(80),
+                _ => cpu_freq,
+            },
+            xtal_clock: xtal_freq.frequency(),
+            #[cfg(esp32)]
+            i2c_clock: todo!(),
+            #[cfg(esp32)]
+            pwm_clock: todo!(),
+            #[cfg(esp32s3)]
+            crypto_pwm_clock: todo!(),
+            #[cfg(any(esp32c6, esp32h2))]
+            crypto_clock: todo!(),
+            #[cfg(esp32h2)]
+            pll_48m_clock: todo!(),
+            #[cfg(esp32h2)]
+            pll_96m_clock: todo!(),
         }
     }
 }
