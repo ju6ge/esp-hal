@@ -777,7 +777,7 @@ where
     }
 
     /// Change the number of data bits
-    fn change_data_bits(&mut self, data_bits: config::DataBits) -> &mut Self {
+    pub fn change_data_bits(&mut self, data_bits: config::DataBits) -> &mut Self {
         T::register_block()
             .conf0()
             .modify(|_, w| unsafe { w.bit_num().bits(data_bits as u8) });
@@ -786,7 +786,7 @@ where
     }
 
     /// Change the type of parity checking
-    fn change_parity(&mut self, parity: config::Parity) -> &mut Self {
+    pub fn change_parity(&mut self, parity: config::Parity) -> &mut Self {
         T::register_block().conf0().modify(|_, w| match parity {
             config::Parity::ParityNone => w.parity_en().clear_bit(),
             config::Parity::ParityEven => w.parity_en().set_bit().parity().clear_bit(),
@@ -797,7 +797,7 @@ where
     }
 
     #[cfg(any(esp32c2, esp32c3, esp32s3))]
-    fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
+    pub fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
         // we force the clock source to be APB and don't use the decimal part of the
         // divider
         let clk = clocks.apb_clock.to_Hz();
@@ -829,7 +829,7 @@ where
     }
 
     #[cfg(any(esp32c6, esp32h2))]
-    fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
+    pub fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
         // we force the clock source to be XTAL and don't use the decimal part of
         // the divider
         let clk = clocks.xtal_clock.to_Hz();
@@ -889,7 +889,7 @@ where
     }
 
     #[cfg(any(esp32, esp32s2))]
-    fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
+    pub fn change_baud(&self, baudrate: u32, clocks: &Clocks) {
         // we force the clock source to be APB and don't use the decimal part of the
         // divider
         let clk = clocks.apb_clock.to_Hz();
