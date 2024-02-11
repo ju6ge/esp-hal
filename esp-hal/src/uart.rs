@@ -1364,7 +1364,10 @@ where
         }
 
         while T::get_rx_fifo_count() == 0 {
-            // Block until we received at least one byte
+            // Block until bytes rx state is idle or bytes where received
+            if T::is_rx_idle() {
+                return Ok(0);
+            }
         }
 
         Ok(self.drain_fifo(buf))
