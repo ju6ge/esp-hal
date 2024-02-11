@@ -472,7 +472,7 @@ fn hal_main(a0: usize, a1: usize, a2: usize) -> ! {
     }
 }
 
-#[export_name = "__stack_chk_fail"]
-unsafe extern "C" fn stack_chk_fail() {
-    panic!("Stack corruption detected");
-}
+//#[export_name = "__stack_chk_fail"]
+//unsafe extern "C" fn stack_chk_fail() {
+//    panic!("Stack corruption detected");
+//}
