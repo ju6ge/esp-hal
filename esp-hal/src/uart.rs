@@ -708,6 +708,15 @@ where
             .bit_is_set()
     }
 
+    /// Reset RX Fifo
+    pub fn reset_rx_fifo(&mut self) {
+        T::register_block().conf0().modify(|_, w| w.rxfifo_rst().set_bit());
+        self.sync_regs();
+
+        T::register_block().conf0().modify(|_, w| w.rxfifo_rst().clear_bit());
+        self.sync_regs();
+    }
+
     /// Reset AT-CMD interrupt
     pub fn reset_at_cmd_interrupt(&self) {
         T::register_block()
