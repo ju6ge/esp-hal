@@ -87,7 +87,7 @@ use fugit::HertzU32;
 
 use crate::{
     clock::Clocks,
-    gpio::{InputPin, OutputPin},
+    gpio::{InputPin, OutputPin, OutputSignal},
     peripheral::Peripheral,
     rmt::private::CreateInstance,
     soc::constants,
@@ -201,6 +201,8 @@ pub struct RxChannelConfig {
 
 pub use impl_for_chip::Rmt;
 
+use self::private::TxChannelInternal;
+
 impl<'d> Rmt<'d> {
     /// Create a new RMT instance
     pub fn new(
@@ -246,23 +248,15 @@ impl<'d> Rmt<'d> {
     }
 }
 
-pub trait TxChannelCreator<'d, T, P>
+pub trait TxChannelCreator<'d, T>
 where
-    P: OutputPin,
     T: TxChannel,
 {
     /// Configure the TX channel
-    fn configure(
-        self,
-        pin: impl Peripheral<P = P> + 'd,
-        config: TxChannelConfig,
-    ) -> Result<T, Error>
+    fn configure(self, config: TxChannelConfig) -> Result<T, Error>
     where
         Self: Sized,
     {
-        crate::into_ref!(pin);
-        pin.set_to_push_pull_output()
-            .connect_peripheral_to_output(T::output_signal());
         T::set_divider(config.clk_divider);
         T::set_carrier(
             config.carrier_modulation,
@@ -273,6 +267,16 @@ where
         T::set_idle_output(config.idle_output, config.idle_output_level);
 
         Ok(T::new())
+    }
+
+    fn connect_pin<P>(self, pin: impl Peripheral<P = P> + 'd)
+    where
+        Self: Sized,
+        P: OutputPin,
+    {
+        crate::into_ref!(pin);
+        pin.set_to_push_pull_output()
+            .connect_peripheral_to_output(T::output_signal());
     }
 }
 
@@ -335,47 +339,77 @@ impl<'a, C, T: Into<u32> + Copy> SingleShotTxTransaction<'a, C, T>
 where
     C: TxChannel,
 {
+    fn buffer_synced(&mut self) -> bool {
+        if self.index < self.data.len() {
+            // wait for TX-THR
+            loop {
+                if <C as private::TxChannelInternal>::is_threshold_set() {
+                    break;
+                }
+            }
+            <C as private::TxChannelInternal>::reset_threshold_set();
+
+            // re-fill TX RAM
+            let ram_index = (((self.index - constants::RMT_CHANNEL_RAM_SIZE)
+                / (constants::RMT_CHANNEL_RAM_SIZE / 2))
+                % 2)
+                * (constants::RMT_CHANNEL_RAM_SIZE / 2);
+
+            let ptr = (constants::RMT_RAM_START
+                + C::CHANNEL as usize * constants::RMT_CHANNEL_RAM_SIZE * 4
+                + ram_index * 4) as *mut u32;
+            for (idx, entry) in self.data[self.index..]
+                .iter()
+                .take(constants::RMT_CHANNEL_RAM_SIZE / 2)
+                .enumerate()
+            {
+                unsafe {
+                    ptr.add(idx).write_volatile((*entry).into());
+                }
+            }
+
+            self.index += constants::RMT_CHANNEL_RAM_SIZE / 2;
+            false
+        } else {
+            true
+        }
+    }
+
     /// Wait for the transaction to complete
     pub fn wait(mut self) -> Result<C, (Error, C)> {
         loop {
             if <C as private::TxChannelInternal>::is_error() {
                 return Err((Error::TransmissionError, self.channel));
             }
-
-            if self.index < self.data.len() {
-                // wait for TX-THR
-                loop {
-                    if <C as private::TxChannelInternal>::is_threshold_set() {
-                        break;
-                    }
-                }
-                <C as private::TxChannelInternal>::reset_threshold_set();
-
-                // re-fill TX RAM
-                let ram_index = (((self.index - constants::RMT_CHANNEL_RAM_SIZE)
-                    / (constants::RMT_CHANNEL_RAM_SIZE / 2))
-                    % 2)
-                    * (constants::RMT_CHANNEL_RAM_SIZE / 2);
-
-                let ptr = (constants::RMT_RAM_START
-                    + C::CHANNEL as usize * constants::RMT_CHANNEL_RAM_SIZE * 4
-                    + ram_index * 4) as *mut u32;
-                for (idx, entry) in self.data[self.index..]
-                    .iter()
-                    .take(constants::RMT_CHANNEL_RAM_SIZE / 2)
-                    .enumerate()
-                {
-                    unsafe {
-                        ptr.add(idx).write_volatile((*entry).into());
-                    }
-                }
-
-                self.index += constants::RMT_CHANNEL_RAM_SIZE / 2;
-            } else {
+            if self.buffer_synced() {
                 break;
             }
         }
 
+        loop {
+            if <C as private::TxChannelInternal>::is_error() {
+                return Err((Error::TransmissionError, self.channel));
+            }
+
+            if <C as private::TxChannelInternal>::is_done() {
+                break;
+            }
+        }
+
+        Ok(self.channel)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        if <C as private::TxChannelInternal>::is_error()
+            || <C as private::TxChannelInternal>::is_done()
+        {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn finish(mut self) -> Result<C, (Error, C)> {
         loop {
             if <C as private::TxChannelInternal>::is_error() {
                 return Err((Error::TransmissionError, self.channel));
@@ -454,10 +488,8 @@ where
 
 macro_rules! impl_tx_channel_creator {
     ($channel:literal) => {
-        impl<'d, P> $crate::rmt::TxChannelCreator<'d, $crate::rmt::Channel<$channel>, P>
+        impl<'d> $crate::rmt::TxChannelCreator<'d, $crate::rmt::Channel<$channel>>
             for ChannelCreator<$channel>
-        where
-            P: $crate::gpio::OutputPin,
         {
         }
 
@@ -722,16 +754,23 @@ pub trait TxChannel: private::TxChannelInternal {
     /// This returns a [`SingleShotTxTransaction`] which can be used to wait for
     /// the transaction to complete and get back the channel for further
     /// use.
-    fn transmit<T: Into<u32> + Copy>(self, data: &[T]) -> SingleShotTxTransaction<Self, T>
+    fn transmit<T: Into<u32> + Copy>(
+        self,
+        data: &[T],
+    ) -> Result<SingleShotTxTransaction<Self, T>, Error>
     where
         Self: Sized,
     {
+        if data.len() > constants::RMT_CHANNEL_RAM_SIZE {
+            return Err(Error::Overflow);
+        }
+
         let index = Self::send_raw(data, false, 0);
-        SingleShotTxTransaction {
+        Ok(SingleShotTxTransaction {
             channel: self,
             index,
             data,
-        }
+        })
     }
 
     /// Start transmitting the given pulse code continuously.
@@ -765,6 +804,10 @@ pub trait TxChannel: private::TxChannelInternal {
 
         let _index = Self::send_raw(data, true, loopcount);
         Ok(ContinuousTxTransaction { channel: self })
+    }
+
+    fn signal(&self) -> OutputSignal {
+        <Self as private::TxChannelInternal>::output_signal()
     }
 }
 
